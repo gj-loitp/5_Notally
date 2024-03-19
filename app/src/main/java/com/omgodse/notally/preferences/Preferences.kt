@@ -23,6 +23,7 @@ class Preferences private constructor(app: Application) {
     val textSize = BetterLiveData(getListPref(TextSize))
     var maxItems = getSeekbarPref(MaxItems)
     var maxLines = getSeekbarPref(MaxLines)
+    var maxTitle = getSeekbarPref(MaxTitle)
 
     val autoBackup = BetterLiveData(getTextPref(AutoBackup))
 
@@ -33,12 +34,47 @@ class Preferences private constructor(app: Application) {
     private fun getSeekbarPref(info: SeekbarInfo) = requireNotNull(preferences.getInt(info.key, info.defaultValue))
 
 
+    fun getWidgetData(id: Int) = preferences.getLong("widget:$id", 0)
+
+    fun deleteWidget(id: Int) {
+        editor.remove("widget:$id")
+        editor.commit()
+    }
+
+    fun updateWidget(id: Int, noteId: Long) {
+        editor.putLong("widget:$id", noteId)
+        editor.commit()
+    }
+
+    fun getUpdatableWidgets(noteIds: LongArray): List<Pair<Int, Long>> {
+        val updatableWidgets = ArrayList<Pair<Int, Long>>()
+        val pairs = preferences.all
+        pairs.keys.forEach { key ->
+            val token = "widget:"
+            if (key.startsWith(token)) {
+                val end = key.substringAfter(token)
+                val id = end.toIntOrNull()
+                if (id != null) {
+                    val value = pairs[key] as? Long
+                    if (value != null) {
+                        if (noteIds.contains(value)) {
+                            updatableWidgets.add(Pair(id, value))
+                        }
+                    }
+                }
+            }
+        }
+        return updatableWidgets
+    }
+
+
     fun savePreference(info: SeekbarInfo, value: Int) {
         editor.putInt(info.key, value)
         editor.commit()
         when (info) {
             MaxItems -> maxItems = getSeekbarPref(MaxItems)
             MaxLines -> maxLines = getSeekbarPref(MaxLines)
+            MaxTitle -> maxTitle = getSeekbarPref(MaxTitle)
         }
     }
 

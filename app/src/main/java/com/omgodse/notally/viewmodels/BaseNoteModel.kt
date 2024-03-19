@@ -1,7 +1,6 @@
 package com.omgodse.notally.viewmodels
 
 import android.app.Application
-import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
@@ -11,8 +10,13 @@ import android.text.Html
 import android.widget.Toast
 import androidx.core.text.toHtml
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
+import com.omgodse.notally.ActionMode
+import com.omgodse.notally.BackupProgress
+import com.omgodse.notally.Cache
+import com.omgodse.notally.ImageDeleteService
 import com.omgodse.notally.R
 import com.omgodse.notally.legacy.Migrations
 import com.omgodse.notally.legacy.XMLUtils
@@ -24,11 +28,22 @@ import com.omgodse.notally.preferences.AutoBackup
 import com.omgodse.notally.preferences.ListInfo
 import com.omgodse.notally.preferences.Preferences
 import com.omgodse.notally.preferences.SeekbarInfo
-import com.omgodse.notally.room.*
+import com.omgodse.notally.room.BaseNote
+import com.omgodse.notally.room.Color
+import com.omgodse.notally.room.Converters
+import com.omgodse.notally.room.Folder
+import com.omgodse.notally.room.Header
+import com.omgodse.notally.room.Image
+import com.omgodse.notally.room.Item
+import com.omgodse.notally.room.Label
+import com.omgodse.notally.room.NotallyDatabase
+import com.omgodse.notally.room.Type
 import com.omgodse.notally.room.livedata.Content
 import com.omgodse.notally.room.livedata.SearchResult
+import com.omgodse.notally.widget.WidgetProvider
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -36,23 +51,24 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.*
+import java.text.DateFormat
+import java.util.UUID
 import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
 
     private val database = NotallyDatabase.getDatabase(app)
-    private val labelDao = database.labelDao
-    private val commonDao = database.commonDao
-    private val baseNoteDao = database.baseNoteDao
+    private val labelDao = database.getLabelDao()
+    private val commonDao = database.getCommonDao()
+    private val baseNoteDao = database.getBaseNoteDao()
 
     private val labelCache = HashMap<String, Content>()
-    val formatter = getDateFormatter(app)
 
     var currentFile: File? = null
 
     val labels = labelDao.getAll()
+    private val allNotes = baseNoteDao.getAll()
     val baseNotes = Content(baseNoteDao.getFrom(Folder.NOTES), ::transform)
     val deletedNotes = Content(baseNoteDao.getFrom(Folder.DELETED), ::transform)
     val archivedNotes = Content(baseNoteDao.getFrom(Folder.ARCHIVED), ::transform)
@@ -79,10 +95,12 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
 
     val preferences = Preferences.getInstance(app)
 
-    private val backupExceptionHandler = CoroutineExceptionHandler { _, throwable ->
-        Operations.log(app, throwable)
-        Toast.makeText(app, R.string.invalid_backup, Toast.LENGTH_LONG).show()
-    }
+    val mediaRoot = IO.getExternalImagesDirectory(app)
+
+    val importingBackup = MutableLiveData<BackupProgress>()
+    val exportingBackup = MutableLiveData<BackupProgress>()
+
+    val actionMode = ActionMode()
 
     init {
         viewModelScope.launch {
@@ -97,6 +115,9 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+        allNotes.observeForever { list ->
+            Cache.list = list
+        }
     }
 
     fun getNotesByLabel(label: String): Content {
@@ -107,26 +128,7 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
     }
 
 
-    private fun transform(list: List<BaseNote>): List<Item> {
-        if (list.isEmpty()) {
-            return list
-        } else {
-            val firstNote = list[0]
-            return if (firstNote.pinned) {
-                val newList = ArrayList<Item>(list.size + 2)
-                newList.add(pinned)
-
-                val firstUnpinnedNote = list.indexOfFirst { baseNote -> !baseNote.pinned }
-                list.forEachIndexed { index, baseNote ->
-                    if (index == firstUnpinnedNote) {
-                        newList.add(others)
-                    }
-                    newList.add(baseNote)
-                }
-                newList
-            } else list
-        }
-    }
+    private fun transform(list: List<BaseNote>) = transform(list, pinned, others)
 
 
     fun savePreference(info: SeekbarInfo, value: Int) = executeAsync { preferences.savePreference(info, value) }
@@ -161,15 +163,39 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
 
     fun exportBackup(uri: Uri) {
         viewModelScope.launch {
+            exportingBackup.value = BackupProgress(true, 0, 0, true)
+
             withContext(Dispatchers.IO) {
-                (app.contentResolver.openOutputStream(uri) as? FileOutputStream)?.use { stream ->
-                    stream.channel.truncate(0)
-                    Export.backupToZip(app, stream)
+                val outputStream = requireNotNull(app.contentResolver.openOutputStream(uri))
+                (outputStream as FileOutputStream).channel.truncate(0)
+
+                val zipStream = ZipOutputStream(outputStream)
+
+                database.checkpoint()
+                Export.backupDatabase(app, zipStream)
+
+                delay(1000)
+
+                val strings = baseNoteDao.getAllImages()
+                val images = strings.flatMap(Converters::jsonToImages)
+                images.forEachIndexed { index, image ->
+                    try {
+                        Export.backupImage(zipStream, mediaRoot, image)
+                    } catch (exception: Exception) {
+                        Operations.log(app, exception)
+                    } finally {
+                        exportingBackup.postValue(BackupProgress(true, index + 1, images.size, false))
+                    }
                 }
+
+                zipStream.close()
             }
+
+            exportingBackup.value = BackupProgress(false, 0, 0, false)
             Toast.makeText(app, R.string.saved_to_device, Toast.LENGTH_LONG).show()
         }
     }
+
 
     fun importBackup(uri: Uri) {
         when (app.contentResolver.getType(uri)) {
@@ -180,16 +206,28 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
 
 
     /**
-     * Lots of things can go wrong, instead of trying to account for all of them,
-     * display a generic message and allow the user to send a report
+     * We use a ZipFile instead of ZipInputStream because importing one image of 3 MB takes 1 second
+     * on a phone with 6GB RAM. This is non negligible so we need to display the progress. However, with a stream
+     * there is no way to know how many images are there, hence we can only display an indeterminate progress bar
+     * which is almost as useless as displaying no progress bar.
+     *
+     * We only import the images referenced in notes. e.g If someone has added garbage to the
+     * ZIP file, like a 100 MB image, ignore it.
      */
     private fun importZipBackup(uri: Uri) {
-        viewModelScope.launch(backupExceptionHandler) {
-            val stream = app.contentResolver.openInputStream(uri)
-            requireNotNull(stream) { "inputStream opened by contentResolver is null" }
+        val backupDir = getBackupDir()
+
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            finishImporting(backupDir)
+            Toast.makeText(app, R.string.invalid_backup, Toast.LENGTH_LONG).show()
+            Operations.log(app, throwable)
+        }
+
+        viewModelScope.launch(exceptionHandler) {
+            importingBackup.value = BackupProgress(true, 0, 0, true)
 
             withContext(Dispatchers.IO) {
-                val backupDir = getBackupPath()
+                val stream = requireNotNull(app.contentResolver.openInputStream(uri))
                 val destination = File(backupDir, "TEMP.zip")
                 IO.copyStreamToFile(stream, destination)
 
@@ -208,9 +246,37 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
                 val labels = convertCursorToList(labelCursor, ::convertCursorToLabel)
                 val baseNotes = convertCursorToList(baseNoteCursor, ::convertCursorToBaseNote)
 
+                delay(1000)
+
+                val total = baseNotes.fold(0) { acc, baseNote -> return@fold acc + baseNote.images.size }
+                var current = 1
+
+                // Don't let a single image bring down the entire backup
+                baseNotes.forEach { baseNote ->
+                    baseNote.images.forEach { image ->
+                        try {
+                            val entry = zipFile.getEntry("Images/${image.name}")
+                            if (entry != null) {
+                                val extension = image.name.substringAfterLast(".")
+                                val name = "${UUID.randomUUID()}.$extension"
+                                val file = File(mediaRoot, name)
+                                image.name = name
+                                val imageStream = zipFile.getInputStream(entry)
+                                IO.copyStreamToFile(imageStream, file)
+                            }
+                        } catch (exception: Exception) {
+                            Operations.log(app, exception)
+                        } finally {
+                            importingBackup.postValue(BackupProgress(true, current, total, false))
+                            current++
+                        }
+                    }
+                }
+
                 commonDao.importBackup(baseNotes, labels)
             }
-            Toast.makeText(app, R.string.imported_backup, Toast.LENGTH_LONG).show()
+
+            finishImporting(backupDir)
         }
     }
 
@@ -245,7 +311,12 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
         val spans = Converters.jsonToSpans(spansTmp)
         val items = Converters.jsonToItems(itemsTmp)
 
-        return BaseNote(0, type, folder, color, title, pinned, timestamp, labels, body, spans, items, emptyList())
+        val imagesIndex = cursor.getColumnIndex("images")
+        val images = if (imagesIndex != -1) {
+            Converters.jsonToImages(cursor.getString(imagesIndex))
+        } else emptyList()
+
+        return BaseNote(0, type, folder, color, title, pinned, timestamp, labels, body, spans, items, images)
     }
 
     private fun <T> convertCursorToList(cursor: Cursor, convert: (cursor: Cursor) -> T): ArrayList<T> {
@@ -258,12 +329,21 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
         return list
     }
 
+    private fun finishImporting(backupDir: File) {
+        importingBackup.value = BackupProgress(false, 0, 0, false)
+        clear(backupDir)
+    }
+
 
     private fun importXmlBackup(uri: Uri) {
-        viewModelScope.launch(backupExceptionHandler) {
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            Operations.log(app, throwable)
+            Toast.makeText(app, R.string.invalid_backup, Toast.LENGTH_LONG).show()
+        }
+
+        viewModelScope.launch(exceptionHandler) {
             withContext(Dispatchers.IO) {
-                val stream = app.contentResolver.openInputStream(uri)
-                requireNotNull(stream) { "inputStream opened by contentResolver is null" }
+                val stream = requireNotNull(app.contentResolver.openInputStream(uri))
                 val backup = XMLUtils.readBackupFromStream(stream)
                 commonDao.importBackup(backup.first, backup.second)
             }
@@ -298,7 +378,7 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
         val file = File(getExportedPath(), "Untitled.txt")
         val writer = file.bufferedWriter()
 
-        val date = formatter.format(baseNote.timestamp)
+        val date = DateFormat.getDateInstance(DateFormat.FULL).format(baseNote.timestamp)
 
         val body = when (baseNote.type) {
             Type.NOTE -> baseNote.body
@@ -331,25 +411,66 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
     }
 
 
-    fun colorBaseNote(id: Long, color: Color) = executeAsync { baseNoteDao.updateColor(id, color) }
+    fun pinBaseNote(pinned: Boolean) {
+        val id = actionMode.selectedIds.toLongArray()
+        actionMode.close(false)
+        executeAsync { baseNoteDao.updatePinned(id, pinned) }
+    }
+
+    fun colorBaseNote(color: Color) {
+        val ids = actionMode.selectedIds.toLongArray()
+        actionMode.close(true)
+        executeAsync { baseNoteDao.updateColor(ids, color) }
+    }
+
+    fun moveBaseNotes(folder: Folder) {
+        val ids = actionMode.selectedIds.toLongArray()
+        actionMode.close(false)
+        executeAsync { baseNoteDao.move(ids, folder) }
+    }
+
+    fun updateBaseNoteLabels(labels: List<String>, id: Long) {
+        actionMode.close(true)
+        executeAsync { baseNoteDao.updateLabels(id, labels) }
+    }
 
 
-    fun pinBaseNote(id: Long) = executeAsync { baseNoteDao.updatePinned(id, true) }
+    fun deleteBaseNotes() {
+        val ids = LongArray(actionMode.selectedNotes.size)
+        val images = ArrayList<Image>()
+        actionMode.selectedNotes.onEachIndexed { index, entry ->
+            ids[index] = entry.key
+            images.addAll(entry.value.images)
+        }
+        actionMode.close(false)
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { baseNoteDao.delete(ids) }
+            informOtherComponents(images, ids)
+        }
+    }
 
-    fun unpinBaseNote(id: Long) = executeAsync { baseNoteDao.updatePinned(id, false) }
+    fun deleteAllBaseNotes() {
+        viewModelScope.launch {
+            val ids: LongArray
+            val images = ArrayList<Image>()
+            withContext(Dispatchers.IO) {
+                ids = baseNoteDao.getDeletedNoteIds()
+                val strings = baseNoteDao.getDeletedNoteImages()
+                strings.flatMapTo(images, Converters::jsonToImages)
+                baseNoteDao.deleteFrom(Folder.DELETED)
+            }
+            informOtherComponents(images, ids)
+        }
+    }
 
-
-    fun deleteAllBaseNotes() = executeAsync { baseNoteDao.deleteFrom(Folder.DELETED) }
-
-    fun restoreBaseNote(id: Long) = executeAsync { baseNoteDao.move(id, Folder.NOTES) }
-
-    fun moveBaseNoteToDeleted(id: Long) = executeAsync { baseNoteDao.move(id, Folder.DELETED) }
-
-    fun moveBaseNoteToArchive(id: Long) = executeAsync { baseNoteDao.move(id, Folder.ARCHIVED) }
-
-    fun deleteBaseNoteForever(id: Long) = executeAsync { baseNoteDao.delete(id) }
-
-    fun updateBaseNoteLabels(labels: List<String>, id: Long) = executeAsync { baseNoteDao.updateLabels(id, labels) }
+    private fun informOtherComponents(images: ArrayList<Image>, ids: LongArray) {
+        if (images.isNotEmpty()) {
+            ImageDeleteService.start(app, images)
+        }
+        if (ids.isNotEmpty()) {
+            WidgetProvider.sendBroadcast(app, ids)
+        }
+    }
 
 
     suspend fun getAllLabels() = withContext(Dispatchers.IO) { labelDao.getArrayOfAll() }
@@ -366,17 +487,21 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
     private fun getEmptyFolder(name: String): File {
         val folder = File(app.cacheDir, name)
         if (folder.exists()) {
-            val files = folder.listFiles()
-            if (files != null) {
-                for (file in files) {
-                    file.delete()
-                }
-            }
+            clear(folder)
         } else folder.mkdir()
         return folder
     }
 
-    private fun getBackupPath() = getEmptyFolder("backup")
+    private fun clear(directory: File) {
+        val files = directory.listFiles()
+        if (files != null) {
+            for (file in files) {
+                file.delete()
+            }
+        }
+    }
+
+    private fun getBackupDir() = getEmptyFolder("backup")
 
     private fun getExportedPath() = getEmptyFolder("exported")
 
@@ -395,6 +520,7 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
                 jsonObject.put("body", baseNote.body)
                 jsonObject.put("spans", Converters.spansToJSONArray(baseNote.spans))
             }
+
             Type.LIST -> {
                 jsonObject.put("items", Converters.itemsToJSONArray(baseNote.items))
             }
@@ -404,7 +530,7 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     private fun getHTML(baseNote: BaseNote, showDateCreated: Boolean) = buildString {
-        val date = formatter.format(baseNote.timestamp)
+        val date = DateFormat.getDateInstance(DateFormat.FULL).format(baseNote.timestamp)
         val title = Html.escapeHtml(baseNote.title)
 
         append("<!DOCTYPE html>")
@@ -422,6 +548,7 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
                 val body = baseNote.body.applySpans(baseNote.spans).toHtml()
                 append(body)
             }
+
             Type.LIST -> {
                 append("<ol style=\"list-style: none; padding: 0;\">")
                 baseNote.items.forEach { item ->
@@ -442,14 +569,25 @@ class BaseNoteModel(private val app: Application) : AndroidViewModel(app) {
 
     companion object {
 
-        fun getDateFormatter(context: Context): SimpleDateFormat {
-            val locale = context.resources.configuration.locale
-            val pattern = when (locale.language) {
-                Locale.CHINESE.language,
-                Locale.JAPANESE.language -> "yyyy年 MMM d日 (EEE)"
-                else -> "EEE d MMM yyyy"
+        fun transform(list: List<BaseNote>, pinned: Header, others: Header): List<Item> {
+            if (list.isEmpty()) {
+                return list
+            } else {
+                val firstNote = list[0]
+                return if (firstNote.pinned) {
+                    val newList = ArrayList<Item>(list.size + 2)
+                    newList.add(pinned)
+
+                    val firstUnpinnedNote = list.indexOfFirst { baseNote -> !baseNote.pinned }
+                    list.forEachIndexed { index, baseNote ->
+                        if (index == firstUnpinnedNote) {
+                            newList.add(others)
+                        }
+                        newList.add(baseNote)
+                    }
+                    newList
+                } else list
             }
-            return SimpleDateFormat(pattern, locale)
         }
     }
 }

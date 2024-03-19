@@ -9,4 +9,12 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <TextView
+        android:id="@+id/Message"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:text="@string/cant_load_image"
+        android:textAppearance="?attr/textAppearanceBody2" />
+
 </FrameLayout>

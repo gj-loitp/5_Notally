@@ -2,12 +2,19 @@ package com.omgodse.notally.room.dao
 
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Transformations
-import androidx.room.*
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.RawQuery
+import androidx.room.Update
 import androidx.sqlite.db.SupportSQLiteQuery
 import com.omgodse.notally.room.BaseNote
 import com.omgodse.notally.room.Color
 import com.omgodse.notally.room.Folder
+import com.omgodse.notally.room.Image
 import com.omgodse.notally.room.LabelsInBaseNote
+import com.omgodse.notally.room.ListItem
 
 @Dao
 interface BaseNoteDao {
@@ -29,25 +36,79 @@ interface BaseNoteDao {
     @Query("DELETE FROM BaseNote WHERE id = :id")
     suspend fun delete(id: Long)
 
+    @Query("DELETE FROM BaseNote WHERE id IN (:ids)")
+    suspend fun delete(ids: LongArray)
+
     @Query("DELETE FROM BaseNote WHERE folder = :folder")
     suspend fun deleteFrom(folder: Folder)
+
 
     @Query("SELECT * FROM BaseNote WHERE folder = :folder ORDER BY pinned DESC, timestamp DESC")
     fun getFrom(folder: Folder): LiveData<List<BaseNote>>
 
+    @Query("SELECT * FROM BaseNote WHERE folder = 'NOTES' ORDER BY pinned DESC, timestamp DESC")
+    suspend fun getAllNotes(): List<BaseNote>
 
-    @Query("UPDATE BaseNote SET folder = :folder WHERE id = :id")
-    suspend fun move(id: Long, folder: Folder)
+    @Query("SELECT * FROM BaseNote")
+    fun getAll(): LiveData<List<BaseNote>>
+
+    @Query("SELECT * FROM BaseNote WHERE id = :id")
+    fun get(id: Long): BaseNote?
+
+    @Query("SELECT images FROM BaseNote WHERE id = :id")
+    fun getImages(id: Long): String
+
+    @Query("SELECT images FROM BaseNote")
+    fun getAllImages(): List<String>
 
 
-    @Query("UPDATE BaseNote SET color = :color WHERE id = :id")
-    suspend fun updateColor(id: Long, color: Color)
+    @Query("SELECT id FROM BaseNote WHERE folder = 'DELETED'")
+    suspend fun getDeletedNoteIds(): LongArray
 
-    @Query("UPDATE BaseNote SET pinned = :pinned WHERE id = :id")
-    suspend fun updatePinned(id: Long, pinned: Boolean)
+    @Query("SELECT images FROM BaseNote WHERE folder = 'DELETED'")
+    suspend fun getDeletedNoteImages(): List<String>
+
+
+    @Query("UPDATE BaseNote SET folder = :folder WHERE id IN (:ids)")
+    suspend fun move(ids: LongArray, folder: Folder)
+
+
+    @Query("UPDATE BaseNote SET color = :color WHERE id IN (:ids)")
+    suspend fun updateColor(ids: LongArray, color: Color)
+
+    @Query("UPDATE BaseNote SET pinned = :pinned WHERE id IN (:ids)")
+    suspend fun updatePinned(ids: LongArray, pinned: Boolean)
 
     @Query("UPDATE BaseNote SET labels = :labels WHERE id = :id")
     suspend fun updateLabels(id: Long, labels: List<String>)
+
+    @Query("UPDATE BaseNote SET items = :items WHERE id = :id")
+    suspend fun updateItems(id: Long, items: List<ListItem>)
+
+    @Query("UPDATE BaseNote SET images = :images WHERE id = :id")
+    suspend fun updateImages(id: Long, images: List<Image>)
+
+
+    /**
+     * Both id and position can be invalid.
+     *
+     * Example of id being invalid - User adds a widget,
+     * then goes to Settings and clears app data. Now the
+     * widget refers to a list which doesn't exist.
+     *
+     * Example of position being invalid - User adds a widget,
+     * goes to Settings, clears app data and then imports a backup.
+     * Even if the backup contains the same list and it is inserted
+     * with the same id, it may not be of the safe size.
+     *
+     * In this case, an exception will be thrown. It is the caller's
+     * responsibility to handle it.
+     */
+    suspend fun updateChecked(id: Long, position: Int, checked: Boolean) {
+        val items = requireNotNull(get(id)).items
+        items[position].checked = checked
+        updateItems(id, items)
+    }
 
 
     /**

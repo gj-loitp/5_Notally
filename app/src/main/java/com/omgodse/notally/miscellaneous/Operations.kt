@@ -8,21 +8,17 @@ import android.os.Build
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
-import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.google.android.material.chip.ChipGroup
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.shape.MaterialShapeDrawable
 import com.google.android.material.shape.RelativeCornerSize
 import com.google.android.material.shape.RoundedCornerTreatment
 import com.google.android.material.shape.ShapeAppearanceModel
 import com.omgodse.notally.BuildConfig
 import com.omgodse.notally.R
-import com.omgodse.notally.databinding.DialogInputBinding
 import com.omgodse.notally.databinding.LabelBinding
 import com.omgodse.notally.preferences.TextSize
 import com.omgodse.notally.room.Color
-import com.omgodse.notally.room.Label
 import com.omgodse.notally.room.ListItem
 import java.io.File
 import java.io.FileOutputStream
@@ -131,74 +127,9 @@ object Operations {
 
         val drawable = MaterialShapeDrawable(model)
         drawable.fillColor = ColorStateList.valueOf(0)
-        drawable.strokeWidth = context.resources.getDimension(R.dimen.unit)
+        drawable.strokeWidth = context.resources.displayMetrics.density
         drawable.strokeColor = ContextCompat.getColorStateList(context, R.color.chip_stroke)
 
         return drawable
-    }
-
-
-    fun labelNote(
-        context: Context,
-        labels: Array<String>,
-        old: List<String>,
-        onUpdated: (new: List<String>) -> Unit,
-        addLabel: () -> Unit
-    ) {
-        val checkedPositions = labels.map { label -> old.contains(label) }.toBooleanArray()
-
-        val builder = MaterialAlertDialogBuilder(context)
-
-        if (labels.isNotEmpty()) {
-            builder.setTitle(R.string.labels)
-            builder.setNegativeButton(R.string.cancel, null)
-            builder.setMultiChoiceItems(labels, checkedPositions) { dialog, which, isChecked ->
-                checkedPositions[which] = isChecked
-            }
-            builder.setPositiveButton(R.string.save) { dialog, which ->
-                val newLabels = ArrayList<String>()
-                checkedPositions.forEachIndexed { index, checked ->
-                    if (checked) {
-                        val label = labels[index]
-                        newLabels.add(label)
-                    }
-                }
-                onUpdated(newLabels)
-            }
-        } else {
-            builder.setMessage(R.string.create_new)
-            builder.setPositiveButton(R.string.add_label) { dialog, which -> addLabel() }
-        }
-
-        builder.show()
-    }
-
-    fun displayAddLabelDialog(
-        context: Context,
-        insertLabel: (label: Label, onComplete: (success: Boolean) -> Unit) -> Unit,
-        onSuccess: () -> Unit
-    ) {
-        val inflater = LayoutInflater.from(context)
-        val binding = DialogInputBinding.inflate(inflater)
-
-        MaterialAlertDialogBuilder(context)
-            .setTitle(R.string.add_label)
-            .setView(binding.root)
-            .setNegativeButton(R.string.cancel, null)
-            .setPositiveButton(R.string.save) { dialog, which ->
-                val value = binding.EditText.text.toString().trim()
-                if (value.isNotEmpty()) {
-                    val label = Label(value)
-                    insertLabel(label) { success ->
-                        if (success) {
-                            dialog.dismiss()
-                            onSuccess()
-                        } else Toast.makeText(context, R.string.label_exists, Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-            .show()
-
-        binding.EditText.requestFocus()
     }
 }

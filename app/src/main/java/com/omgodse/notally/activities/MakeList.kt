@@ -1,11 +1,9 @@
 package com.omgodse.notally.activities
 
-import android.os.Bundle
-import com.omgodse.notally.R
 import com.omgodse.notally.miscellaneous.setOnNextAction
 import com.omgodse.notally.recyclerview.ListItemListener
-import com.omgodse.notally.recyclerview.adapters.MakeListAdapter
-import com.omgodse.notally.recyclerview.viewholders.MakeListVH
+import com.omgodse.notally.recyclerview.adapter.MakeListAdapter
+import com.omgodse.notally.recyclerview.viewholder.MakeListVH
 import com.omgodse.notally.room.ListItem
 import com.omgodse.notally.room.Type
 
@@ -13,14 +11,10 @@ class MakeList : NotallyActivity(Type.LIST) {
 
     private lateinit var adapter: MakeListAdapter
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
+    override fun configureUI() {
         binding.EnterTitle.setOnNextAction {
             moveToNext(-1)
         }
-
-        setupRecyclerView()
 
         if (model.isNewNote) {
             if (model.items.isEmpty()) {
@@ -37,22 +31,9 @@ class MakeList : NotallyActivity(Type.LIST) {
         }
     }
 
-
-    private fun addListItem() {
-        val position = model.items.size
-        val listItem = ListItem(String(), false)
-        model.items.add(listItem)
-        adapter.notifyItemInserted(position)
-        binding.RecyclerView.post {
-            val viewHolder = binding.RecyclerView.findViewHolderForAdapterPosition(position) as MakeListVH?
-            viewHolder?.binding?.EditText?.requestFocus()
-        }
-    }
-
-
-    private fun setupRecyclerView() {
-        val unit = resources.getDimension(R.dimen.unit)
-        val elevation = unit * 2
+    override fun setStateFromModel() {
+        super.setStateFromModel()
+        val elevation = resources.displayMetrics.density * 2
 
         adapter = MakeListAdapter(model.textSize, elevation, model.items, object : ListItemListener {
 
@@ -75,6 +56,18 @@ class MakeList : NotallyActivity(Type.LIST) {
         })
 
         binding.RecyclerView.adapter = adapter
+    }
+
+
+    private fun addListItem() {
+        val position = model.items.size
+        val listItem = ListItem(String(), false)
+        model.items.add(listItem)
+        adapter.notifyItemInserted(position)
+        binding.RecyclerView.post {
+            val viewHolder = binding.RecyclerView.findViewHolderForAdapterPosition(position) as MakeListVH?
+            viewHolder?.binding?.EditText?.requestFocus()
+        }
     }
 
     private fun moveToNext(currentPosition: Int) {
